@@ -11,4 +11,6 @@ USER ${USER_NAME}
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
+ENV CLAUDE_CODE_DISABLE_MOUSE=1
+
 ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
