@@ -240,17 +240,35 @@ get_extra_mounts
 get_extra_env
 
 # ---------------------------------------------------------------------------
-# Git config mounts (read-only)
+# Read-only host mounts
 # System gitconfig (/etc/gitconfig) is not relabelled (:z omitted) to avoid
 # permanently changing SELinux labels on shared system files.
 # ---------------------------------------------------------------------------
-GIT_CONFIG_MOUNTS=()
+RO_HOST_MOUNTS=()
 [[ -f "${HOME}/.gitconfig" ]] && \
-    GIT_CONFIG_MOUNTS+=(-v "${HOME}/.gitconfig:/home/${USER_NAME}/.gitconfig:ro,z")
+    RO_HOST_MOUNTS+=(-v "${HOME}/.gitconfig:/home/${USER_NAME}/.gitconfig:ro,z")
 [[ -d "${HOME}/.config/git" ]] && \
-    GIT_CONFIG_MOUNTS+=(-v "${HOME}/.config/git:/home/${USER_NAME}/.config/git:ro,z")
+    RO_HOST_MOUNTS+=(-v "${HOME}/.config/git:/home/${USER_NAME}/.config/git:ro,z")
 [[ -f "/etc/gitconfig" ]] && \
-    GIT_CONFIG_MOUNTS+=(-v "/etc/gitconfig:/etc/gitconfig:ro")
+    RO_HOST_MOUNTS+=(-v "/etc/gitconfig:/etc/gitconfig:ro")
+
+# ---------------------------------------------------------------------------
+# SSH agent forwarding
+# Forwards the host ssh-agent socket instead of bind-mounting ~/.ssh, so
+# private key material never enters the container and ~/.ssh's SELinux
+# labels are left untouched. Podman's :z/:Z relabeling does not reliably
+# apply to bind-mounted sockets, so the container is run with SELinux
+# labeling disabled instead (see --security-opt label=disable below) rather
+# than relabeling the host's ssh-agent socket.
+# ---------------------------------------------------------------------------
+SSH_AGENT_MOUNTS=()
+SSH_AGENT_ENV=()
+SSH_AGENT_SECURITY_OPTS=()
+if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]]; then
+    SSH_AGENT_MOUNTS+=(-v "${SSH_AUTH_SOCK}:/run/ssh-agent.sock")
+    SSH_AGENT_ENV+=(--env "SSH_AUTH_SOCK=/run/ssh-agent.sock")
+    SSH_AGENT_SECURITY_OPTS+=(--security-opt label=disable)
+fi
 
 # ---------------------------------------------------------------------------
 # Environment variables forwarded to the container
@@ -279,10 +297,13 @@ exec podman run \
     --interactive \
     --tty \
     --userns=keep-id \
+    "${SSH_AGENT_SECURITY_OPTS[@]+"${SSH_AGENT_SECURITY_OPTS[@]}"}" \
     -v "${PWD}:/workspace:z" \
     "${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}" \
-    "${GIT_CONFIG_MOUNTS[@]+"${GIT_CONFIG_MOUNTS[@]}"}" \
+    "${RO_HOST_MOUNTS[@]+"${RO_HOST_MOUNTS[@]}"}" \
+    "${SSH_AGENT_MOUNTS[@]+"${SSH_AGENT_MOUNTS[@]}"}" \
     "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
     "${FORWARDED_ENV[@]+"${FORWARDED_ENV[@]}"}" \
+    "${SSH_AGENT_ENV[@]+"${SSH_AGENT_ENV[@]}"}" \
     "$IMAGE_NAME" \
     "${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"}"
