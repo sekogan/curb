@@ -10,7 +10,7 @@ image_slug() {
 }
 
 # Parse a mount spec (SRC[:DEST][:ro|rw]) and append a podman -v flag to
-# USER_MOUNTS. DEST defaults to /mnt/<basename of SRC>; mode defaults to ro.
+# PODMAN_ARGS. DEST defaults to /mnt/<basename of SRC>; mode defaults to ro.
 parse_mount_spec() {
     local spec="$1" src dest="" mode="" field
     local -a fields
@@ -46,7 +46,7 @@ parse_mount_spec() {
         echo "curb: mount source '${fields[0]}' does not exist" >&2
         exit 1
     fi
-    USER_MOUNTS+=(-v "${src}:${dest:-/mnt/$(basename "$src")}:${mode:-ro},z")
+    PODMAN_ARGS+=(-v "${src}:${dest:-/mnt/$(basename "$src")}:${mode:-ro},z")
 }
 
 usage() {
@@ -167,9 +167,8 @@ if [[ ! -f "$LIB" ]]; then
     exit 1
 fi
 
-# Provide no-op defaults so lib.sh only needs to define what it uses.
-get_extra_mounts() { :; }
-get_extra_env() { :; }
+# Provide a no-op default so lib.sh only needs to define it if used.
+get_extra_args() { :; }
 
 # shellcheck source=/dev/null
 source "$LIB"
@@ -249,10 +248,17 @@ done
 [[ -n "$CLI_BASE_IMAGE" ]] && BASE_IMAGE="$CLI_BASE_IMAGE"
 
 # ---------------------------------------------------------------------------
-# User-requested extra mounts: MOUNTS from curb.conf plus CLI -m/--mount
-# flags, read-only unless the spec says :rw.
+# Podman run arguments
+# PODMAN_ARGS accumulates mounts, env vars, and security options from the
+# sections below (and from the tool's get_extra_args hook).
 # ---------------------------------------------------------------------------
-USER_MOUNTS=()
+PODMAN_ARGS=()
+
+# ---------------------------------------------------------------------------
+# User-requested extra mounts: MOUNTS from curb.conf plus CLI -m/--mount
+# flags, read-only unless the spec says :rw. Validated here, before the
+# image build, so a bad spec fails fast.
+# ---------------------------------------------------------------------------
 for SPEC in "${MOUNTS[@]+"${MOUNTS[@]}"}" "${CLI_MOUNTS[@]+"${CLI_MOUNTS[@]}"}"; do
     parse_mount_spec "$SPEC"
 done
@@ -304,28 +310,24 @@ elif ! podman image exists "$IMAGE_NAME" 2>/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
-# Tool-specific pre-run setup and mounts
-# get_extra_mounts and get_extra_env are defined in lib.sh (or are no-ops).
-# They append flags to EXTRA_MOUNTS and EXTRA_ENV respectively, and may
-# perform pre-run setup (e.g. creating host directories before mounting).
+# Tool-specific pre-run setup, mounts, and env vars
+# get_extra_args is defined in lib.sh (or is a no-op). It appends flags to
+# PODMAN_ARGS and may perform pre-run setup (e.g. creating host directories
+# before mounting).
 # ---------------------------------------------------------------------------
-EXTRA_MOUNTS=()
-EXTRA_ENV=()
-get_extra_mounts
-get_extra_env
+get_extra_args
 
 # ---------------------------------------------------------------------------
 # Read-only host mounts
 # System gitconfig (/etc/gitconfig) is not relabelled (:z omitted) to avoid
 # permanently changing SELinux labels on shared system files.
 # ---------------------------------------------------------------------------
-RO_HOST_MOUNTS=()
 [[ -f "${HOME}/.gitconfig" ]] && \
-    RO_HOST_MOUNTS+=(-v "${HOME}/.gitconfig:/home/${USER_NAME}/.gitconfig:ro,z")
+    PODMAN_ARGS+=(-v "${HOME}/.gitconfig:/home/${USER_NAME}/.gitconfig:ro,z")
 [[ -d "${HOME}/.config/git" ]] && \
-    RO_HOST_MOUNTS+=(-v "${HOME}/.config/git:/home/${USER_NAME}/.config/git:ro,z")
+    PODMAN_ARGS+=(-v "${HOME}/.config/git:/home/${USER_NAME}/.config/git:ro,z")
 [[ -f "/etc/gitconfig" ]] && \
-    RO_HOST_MOUNTS+=(-v "/etc/gitconfig:/etc/gitconfig:ro")
+    PODMAN_ARGS+=(-v "/etc/gitconfig:/etc/gitconfig:ro")
 
 # ---------------------------------------------------------------------------
 # SSH agent forwarding
@@ -336,20 +338,18 @@ RO_HOST_MOUNTS=()
 # labeling disabled instead (see --security-opt label=disable below) rather
 # than relabeling the host's ssh-agent socket.
 # ---------------------------------------------------------------------------
-SSH_AGENT_MOUNTS=()
-SSH_AGENT_ENV=()
-SSH_AGENT_SECURITY_OPTS=()
 if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]]; then
-    SSH_AGENT_MOUNTS+=(-v "${SSH_AUTH_SOCK}:/run/ssh-agent.sock")
-    SSH_AGENT_ENV+=(--env "SSH_AUTH_SOCK=/run/ssh-agent.sock")
-    SSH_AGENT_SECURITY_OPTS+=(--security-opt label=disable)
+    PODMAN_ARGS+=(
+        -v "${SSH_AUTH_SOCK}:/run/ssh-agent.sock"
+        --env "SSH_AUTH_SOCK=/run/ssh-agent.sock"
+        --security-opt label=disable
+    )
 fi
 
 # ---------------------------------------------------------------------------
 # Environment variables forwarded to the container
 # ---------------------------------------------------------------------------
-FORWARDED_ENV=()
-[[ -n "${EDITOR:-}" ]] && FORWARDED_ENV+=(--env "EDITOR=${EDITOR}")
+[[ -n "${EDITOR:-}" ]] && PODMAN_ARGS+=(--env "EDITOR=${EDITOR}")
 
 # ---------------------------------------------------------------------------
 # Run
@@ -372,14 +372,7 @@ exec podman run \
     --interactive \
     --tty \
     --userns=keep-id \
-    "${SSH_AGENT_SECURITY_OPTS[@]+"${SSH_AGENT_SECURITY_OPTS[@]}"}" \
     -v "${PWD}:/workspace:z" \
-    "${USER_MOUNTS[@]+"${USER_MOUNTS[@]}"}" \
-    "${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}" \
-    "${RO_HOST_MOUNTS[@]+"${RO_HOST_MOUNTS[@]}"}" \
-    "${SSH_AGENT_MOUNTS[@]+"${SSH_AGENT_MOUNTS[@]}"}" \
-    "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
-    "${FORWARDED_ENV[@]+"${FORWARDED_ENV[@]}"}" \
-    "${SSH_AGENT_ENV[@]+"${SSH_AGENT_ENV[@]}"}" \
+    "${PODMAN_ARGS[@]+"${PODMAN_ARGS[@]}"}" \
     "$IMAGE_NAME" \
     "${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"}"
