@@ -9,6 +9,46 @@ image_slug() {
     printf '%s' "$1" | tr -cs 'a-zA-Z0-9' '-' | sed 's/^-//;s/-$//'
 }
 
+# Parse a mount spec (SRC[:DEST][:ro|rw]) and append a podman -v flag to
+# USER_MOUNTS. DEST defaults to /mnt/<basename of SRC>; mode defaults to ro.
+parse_mount_spec() {
+    local spec="$1" src dest="" mode="" field
+    local -a fields
+    IFS=':' read -r -a fields <<< "$spec"
+    src="${fields[0]}"
+    for field in "${fields[@]:1}"; do
+        case $field in
+            /*)
+                if [[ -n "$dest" ]]; then
+                    echo "curb: invalid mount spec '${spec}': more than one destination" >&2
+                    exit 1
+                fi
+                dest="$field"
+                ;;
+            ro|rw)
+                if [[ -n "$mode" ]]; then
+                    echo "curb: invalid mount spec '${spec}': more than one mode" >&2
+                    exit 1
+                fi
+                mode="$field"
+                ;;
+            *)
+                echo "curb: invalid mount spec '${spec}': '${field}' is neither an absolute DEST nor ro/rw" >&2
+                exit 1
+                ;;
+        esac
+    done
+    if [[ -z "$src" ]]; then
+        echo "curb: invalid mount spec '${spec}': empty source" >&2
+        exit 1
+    fi
+    if ! src="$(realpath -e "$src" 2>/dev/null)"; then
+        echo "curb: mount source '${fields[0]}' does not exist" >&2
+        exit 1
+    fi
+    USER_MOUNTS+=(-v "${src}:${dest:-/mnt/$(basename "$src")}:${mode:-ro},z")
+}
+
 usage() {
     cat <<EOF
 Usage: curb TOOL [OPTIONS] [-- TOOL_ARGS...]
@@ -33,6 +73,12 @@ Options:
                              Debian/Ubuntu (apt-get) or RHEL/Fedora/UBI (dnf)
                              compatible. Each distinct base image gets its own
                              cached image.
+  -m, --mount SPEC           Mount an extra host path into the container.
+                             SPEC is SRC[:DEST][:ro|rw]; DEST defaults to
+                             /mnt/<basename of SRC>, mode defaults to ro
+                             (read-only). May be repeated; appends to MOUNTS
+                             from curb.conf. Avoid mounting shared system
+                             directories: mounts are SELinux-relabelled.
   --rebuild                  Rebuild the container image from scratch (--no-cache)
   -h, --help                 Show this help message
 
@@ -89,6 +135,16 @@ if [[ "${1:-}" == "init" ]]; then
 # Must be Debian/Ubuntu (apt-get) or RHEL/Fedora/UBI (dnf) compatible.
 # Each distinct base image gets its own cached container image.
 BASE_IMAGE="${INIT_BASE_IMAGE}"
+
+# Extra host paths to mount into the container, read-only unless :rw.
+#   SRC[:DEST][:ro|rw]    DEST defaults to /mnt/<basename of SRC>
+# Use MOUNTS+=( ... ) to extend the list from ~/.config/curb.conf instead
+# of replacing it. CLI -m/--mount flags append to this list. Avoid mounting
+# shared system directories: mounts are SELinux-relabelled.
+#MOUNTS=(
+#    "\$HOME/datasets"
+#    "/srv/shared:/mnt/shared:rw"
+#)
 EOF
     echo "curb: created ${PWD}/${CONF_FILE}" >&2
     exit 0
@@ -122,6 +178,7 @@ source "$LIB"
 # Configuration
 # ---------------------------------------------------------------------------
 BASE_IMAGE="node:lts-slim"
+MOUNTS=()
 
 # shellcheck source=/dev/null
 [[ -f "${HOME}/.config/curb.conf" ]] && source "${HOME}/.config/curb.conf"
@@ -135,6 +192,7 @@ BASE_IMAGE="node:lts-slim"
 REBUILD=false
 TOOL_ARGS=()
 CLI_BASE_IMAGE=""
+CLI_MOUNTS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -152,6 +210,14 @@ while [[ $# -gt 0 ]]; do
                 usage 1
             fi
             CLI_BASE_IMAGE="$2"
+            shift 2
+            ;;
+        -m|--mount)
+            if [[ -z "${2:-}" ]]; then
+                echo "curb: --mount requires an argument" >&2
+                usage 1
+            fi
+            CLI_MOUNTS+=("$2")
             shift 2
             ;;
         --rebuild)
@@ -181,6 +247,15 @@ done
 [[ -f ".config/curb.conf" ]] && source ".config/curb.conf"
 
 [[ -n "$CLI_BASE_IMAGE" ]] && BASE_IMAGE="$CLI_BASE_IMAGE"
+
+# ---------------------------------------------------------------------------
+# User-requested extra mounts: MOUNTS from curb.conf plus CLI -m/--mount
+# flags, read-only unless the spec says :rw.
+# ---------------------------------------------------------------------------
+USER_MOUNTS=()
+for SPEC in "${MOUNTS[@]+"${MOUNTS[@]}"}" "${CLI_MOUNTS[@]+"${CLI_MOUNTS[@]}"}"; do
+    parse_mount_spec "$SPEC"
+done
 
 COMMON_IMAGE_NAME="curb-common:uid-$(id -u)-$(image_slug "$BASE_IMAGE")"
 IMAGE_NAME="${IMAGE_PREFIX}:uid-$(id -u)-$(image_slug "$BASE_IMAGE")"
@@ -299,6 +374,7 @@ exec podman run \
     --userns=keep-id \
     "${SSH_AGENT_SECURITY_OPTS[@]+"${SSH_AGENT_SECURITY_OPTS[@]}"}" \
     -v "${PWD}:/workspace:z" \
+    "${USER_MOUNTS[@]+"${USER_MOUNTS[@]}"}" \
     "${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}" \
     "${RO_HOST_MOUNTS[@]+"${RO_HOST_MOUNTS[@]}"}" \
     "${SSH_AGENT_MOUNTS[@]+"${SSH_AGENT_MOUNTS[@]}"}" \

@@ -22,6 +22,7 @@ make -C copilot install
 - **Isolation** — the tool runs in a container with access only to the current directory and its config, nothing else on the host.
 - **Custom base images** — layer any tool on top of a Debian/Ubuntu or RHEL/Fedora/UBI image to provide the exact toolchain your project needs.
 - **Per-project configuration** — commit a `.config/curb.conf` to pin the base image for a project (`curb init`).
+- **Extra mounts** — mount additional host directories into the container, read-only by default, with `-m/--mount` or `MOUNTS` in `curb.conf`.
 - **SELinux-aware** — volume mounts are labelled correctly for SELinux hosts (Fedora, RHEL).
 
 > [!WARNING]
@@ -37,6 +38,8 @@ Runs [Claude Code](https://claude.ai/code). Mounts `~/.claude` and `~/.claude.js
 curb claude                                     # launch in the current directory
 curb claude -C ~/projects/myapp                 # launch in a specific directory
 curb claude -b ghcr.io/myorg/dev:latest         # use a custom base image
+curb claude -m ~/datasets                       # mount read-only at /mnt/datasets
+curb claude -m /srv/cache:/cache:rw             # mount read-write at /cache
 curb claude --rebuild                           # rebuild the container image
 curb claude -- --model claude-opus-4-6          # pass arguments directly to claude
 ```
